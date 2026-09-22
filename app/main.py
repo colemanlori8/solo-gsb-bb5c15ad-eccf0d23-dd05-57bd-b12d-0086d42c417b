@@ -1,13 +1,13 @@
-"""FastAPI 入口：创建分析、查询报告。"""
+"""FastAPI 入口：创建分析、查询报告、导出 SARIF。"""
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from jsonschema.exceptions import SchemaError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import compat, compare, gate
+from app import compat, compare, gate, sarif
 from app.database import get_db, init_db
 from app.models import Analysis
 from app.schemas import (
@@ -157,6 +157,22 @@ def evaluation_gate(analysis_id: int, payload: GateRequest, db: Session = Depend
     )
     return {"passed": result["pass"], "counts": result["counts"],
             "blocking": result["blocking"], "exempted": result["exempted"]}
+
+
+@app.get(
+    "/api/analyses/{analysis_id}/sarif",
+    tags=["analyses"],
+    summary="导出 SARIF 2.1.0 报告",
+)
+def get_analysis_sarif(analysis_id: int, db: Session = Depends(get_db)):
+    # 只读导出，绝不修改原始分析记录
+    row = db.get(Analysis, analysis_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分析记录不存在")
+    sarif_log = sarif.report_to_sarif(
+        row.report, analysis_id=row.id, analysis_name=row.name,
+    )
+    return JSONResponse(content=sarif_log, media_type="application/sarif+json")
 
 
 @app.get(

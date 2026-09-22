@@ -16,10 +16,11 @@
 ```
 .
 ├── app/
-│   ├── main.py          # FastAPI 路由：创建分析、查询报告、基线对比、发布门禁
+│   ├── main.py          # FastAPI 路由：创建分析、查询报告、基线对比、发布门禁、SARIF 导出
 │   ├── compat.py        # 兼容性分析引擎（递归比较 + 最小反例生成）
 │   ├── compare.py       # 报告基线对比（issue 指纹 + 新增/修复/仍存/级别变化分类）
 │   ├── gate.py          # 发布门禁（方向阈值、warning 上限、issue 豁免规则）
+│   ├── sarif.py         # SARIF 2.1.0 导出（rule 去重、level 映射、稳定指纹）
 │   ├── database.py      # SQLite / SQLAlchemy 初始化
 │   ├── models.py        # Analysis ORM 模型
 │   └── schemas.py       # Pydantic 请求 / 响应模型
@@ -27,6 +28,7 @@
 │   ├── test_compat.py   # 引擎单元测试（30+ 用例）
 │   ├── test_compare.py  # 基线对比单元测试
 │   ├── test_gate.py     # 发布门禁单元测试
+│   ├── test_sarif.py    # SARIF 导出单元测试与接口测试
 │   └── test_api.py      # 接口端到端测试
 ├── Dockerfile
 ├── docker-compose.yml
@@ -250,6 +252,76 @@ curl http://localhost:8000/api/analyses/1
 ```
 
 记录不存在返回 `404`。
+
+### `GET /api/analyses/{id}/sarif` — 导出 SARIF 2.1.0 报告
+
+把已落库的分析报告转换为 [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
+日志，响应 `Content-Type` 为 `application/sarif+json`，可直接上传到
+GitHub code scanning、Azure DevOps 等支持 SARIF 的平台。接口为**纯只读**
+操作，不会修改原始报告；分析编号不存在返回 `404`。
+
+```bash
+curl http://localhost:8000/api/analyses/1/sarif
+```
+
+响应（节选）：
+
+```json
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "json-schema-compat",
+          "version": "1.0.0",
+          "rules": [
+            { "id": "enum_value_removed", "name": "EnumValueRemoved",
+              "shortDescription": { "text": "JSON Schema 兼容性检查：enum_value_removed" } }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "enum_value_removed",
+          "ruleIndex": 0,
+          "level": "error",
+          "message": { "text": "枚举值 \"viewer\" 在新版中已被移除" },
+          "locations": [
+            { "logicalLocations": [
+              { "name": "#/properties/role",
+                "fullyQualifiedName": "#/properties/role",
+                "kind": "schema" } ] }
+          ],
+          "partialFingerprints": { "issueFingerprint/v1": "3f8a…" },
+          "properties": { "direction": "backward" }
+        }
+      ],
+      "properties": { "analysisId": 1, "analysisName": "user v1 -> v2" }
+    }
+  ]
+}
+```
+
+#### issue -> SARIF 映射规则
+
+| 报告字段          | SARIF 位置                                             |
+| ----------------- | ------------------------------------------------------ |
+| `code`            | 去重后的 `rule`（按 id 排序）与 `result.ruleId`        |
+| `severity`        | `result.level`（`error`→`error`、`warning`→`warning`） |
+| `direction`       | `result.properties.direction`                          |
+| `path`            | `result.locations[0].logicalLocations[0]`              |
+| `message`         | `result.message.text`                                  |
+
+- **稳定指纹**：`partialFingerprints["issueFingerprint/v1"]` 由
+  `direction + path + code` 生成（SHA-256 前 16 个十六进制字符），
+  **不包含 message / reason**，文案调整不影响指纹，同一业务问题在报告
+  版本演进中可被稳定追踪；
+- **确定性输出**：results 按稳定键 `(direction, path, code)` 排序；
+  重复 issue 不去重，分别保留为独立 result；
+- `run.properties` 携带 `analysisId` / `analysisName`，便于在 SARIF
+  平台中回溯来源分析。
 
 ### `POST /api/analyses/compare` — 基线对比两次分析报告
 
