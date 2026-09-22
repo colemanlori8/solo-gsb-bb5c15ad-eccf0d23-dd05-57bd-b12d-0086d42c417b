@@ -16,9 +16,10 @@
 ```
 .
 ├── app/
-│   ├── main.py          # FastAPI 路由：创建分析、查询报告、基线对比、发布门禁
+│   ├── main.py          # FastAPI 路由：创建分析、查询报告、基线对比、发布门禁、SARIF 导出
 │   ├── compat.py        # 兼容性分析引擎（递归比较 + 最小反例生成）
 │   ├── compare.py       # 报告基线对比（issue 指纹 + 新增/修复/仍存/级别变化分类）
+│   ├── sarif.py         # SARIF 2.1.0 导出（issue -> result / rule / logicalLocation）
 │   ├── gate.py          # 发布门禁（方向阈值、warning 上限、issue 豁免规则）
 │   ├── database.py      # SQLite / SQLAlchemy 初始化
 │   ├── models.py        # Analysis ORM 模型
@@ -250,6 +251,89 @@ curl http://localhost:8000/api/analyses/1
 ```
 
 记录不存在返回 `404`。
+
+### `GET /api/analyses/{id}/sarif` — 导出 SARIF 2.1.0 报告
+
+将一份已落库的分析报告转换为 **SARIF v2.1.0**（Static Analysis Results
+Interchange Format，`Content-Type: application/sarif+json`），可直接对接
+GitHub code scanning 等消费 SARIF 的工具链。接口为**纯只读**操作，不会
+修改原始报告；分析编号不存在返回 `404`。
+
+```bash
+curl http://localhost:8000/api/analyses/1/sarif
+```
+
+映射规则：
+
+- 每条 issue 转为一个 **result**，完全重复的 issue 也**分别保留**，不做合并；
+- **rule 按 `code` 去重生成**（同一 code 仅一条，按 ruleId 字典序排列）；
+  rule 的 `defaultConfiguration.level` 取该 code 下出现过的最高严重级别
+  （error > warning），已知 code 附 `shortDescription` 中文说明；
+- issue 的 `severity` 映射为 result 的 SARIF **`level`**
+  （`error` → `error`，`warning` → `warning`）；
+- `direction`（兼容方向，非 SARIF 标准字段）放入 result 的
+  **`properties.direction`**；
+- schema `path` 作为**逻辑位置**：去重后登记到
+  `run.logicalLocations`（含 `name` 与 JSON Pointer 风格的
+  `fullyQualifiedName`），result 经 `locations.logicalLocations.index`
+  引用；
+- 每个 result 带**稳定 `partialFingerprints.businessIdentity/v1`**：
+  由 direction + path + code + 规范化 reason 的 SHA-256（前 16 位）生成，
+  **不含 message**，同一业务问题仅措辞 / 严重级别变化时指纹保持不变；
+- `results` 按 (direction, ruleId, path, level, 指纹) **稳定键排序**；
+  键完全相同的重复项保持报告内相对顺序，因此重复 issue 不会被去重。
+
+响应（节选）：
+
+```json
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "json-schema-compat-analyzer",
+          "version": "1.0.0",
+          "semanticVersion": "1.0.0",
+          "rules": [
+            {
+              "id": "enum_value_removed",
+              "name": "enum_value_removed",
+              "defaultConfiguration": { "level": "error" },
+              "shortDescription": { "text": "枚举值在新版中被删除" }
+            },
+            {
+              "id": "required_added",
+              "name": "required_added",
+              "defaultConfiguration": { "level": "error" },
+              "shortDescription": { "text": "字段在新版中变为必填" }
+            }
+          ]
+        }
+      },
+      "logicalLocations": [
+        { "name": "#", "fullyQualifiedName": "#" },
+        { "name": "status", "fullyQualifiedName": "#/properties/status" }
+      ],
+      "results": [
+        {
+          "ruleId": "enum_value_removed",
+          "level": "error",
+          "message": { "text": "枚举值 \"pending\" 在新版中已被移除" },
+          "locations": [
+            { "logicalLocations": [
+              { "fullyQualifiedName": "#/properties/status", "index": 1 }
+            ] }
+          ],
+          "partialFingerprints": { "businessIdentity/v1": "65d42cb616ce1b35" },
+          "properties": { "direction": "backward" }
+        }
+      ]
+    }
+  ]
+}
+```
 
 ### `POST /api/analyses/compare` — 基线对比两次分析报告
 

@@ -2,12 +2,12 @@
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from jsonschema.exceptions import SchemaError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import compat, compare, gate
+from app import compat, compare, gate, sarif
 from app.database import get_db, init_db
 from app.models import Analysis
 from app.schemas import (
@@ -170,3 +170,24 @@ def get_analysis(analysis_id: int, db: Session = Depends(get_db)):
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分析记录不存在")
     return row.to_dict()
+
+
+@app.get(
+    "/api/analyses/{analysis_id}/sarif",
+    tags=["analyses"],
+    summary="导出 SARIF 2.1.0 分析报告",
+    responses={
+        200: {
+            "content": {"application/sarif+json": {}},
+            "description": "SARIF v2.1.0 文档",
+        },
+        404: {"description": "分析记录不存在"},
+    },
+)
+def export_analysis_sarif(analysis_id: int, db: Session = Depends(get_db)):
+    # 只读取已存报告做格式转换，绝不修改原始分析记录
+    row = db.get(Analysis, analysis_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分析记录不存在")
+    document = sarif.build_sarif(row.to_dict())
+    return JSONResponse(content=document, media_type="application/sarif+json")
